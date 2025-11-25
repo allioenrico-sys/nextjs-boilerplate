@@ -1,0 +1,106 @@
+// Importa i moduli integrati di Node.js.
+// 'https' è necessario per la chiamata a MusicBrainz.
+// 'url' è necessario per analizzare i parametri della query nell'URL.
+const https = require('https');
+const url = require('url');
+
+// Configurazione base per l'API MusicBrainz
+const MUSICBRAINZ_HOSTNAME = 'musicbrainz.org';
+// IMPORTANTE: MusicBrainz richiede un User-Agent specifico. Sostituisci con i tuoi dati.
+const USER_AGENT = 'MITAppInventorMusicSearchServer/1.0.0 (la_tua_email_qui@esempio.com)'; // <--- MODIFICA QUI CON LA TUA EMAIL
+
+/**
+ * Funzione per effettuare la ricerca di una registrazione (canzone) su MusicBrainz.
+ * @param {string} query Il titolo della canzone da cercare.
+ * @returns {Promise<object[]>} Una Promessa che si risolve con i risultati della ricerca.
+ */
+function searchMusicBrainz(query) {
+    return new Promise((resolve, reject) => {
+        const encodedQuery = encodeURIComponent(query);
+        // Costruisce il percorso per la ricerca di registrazioni, limitando a 5 risultati.
+        const path = `/ws/2/recording/?query=${encodedQuery}&fmt=json&limit=5`;
+
+        const options = {
+            hostname: MUSICBRAINZ_HOSTNAME,
+            port: 443, // Porta standard HTTPS
+            path: path,
+            method: 'GET',
+            headers: {
+                'User-Agent': USER_AGENT,
+                'Accept': 'application/json'
+            }
+        };
+
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', (chunk) => {
+                data += chunk;
+            });
+
+            res.on('end', () => {
+                if (res.statusCode >= 200 && res.statusCode < 300) {
+                    try {
+                        const musicBrainzResponse = JSON.parse(data);
+                        // Estrae solo i dati essenziali: titolo, artista e id.
+                        const results = musicBrainzResponse.recordings ? musicBrainzResponse.recordings.map(rec => ({
+                            id: rec.id,
+                            title: rec.title,
+                            artist: rec['artist-credit'] ? rec['artist-credit'].map(ac => ac.name).join(' & ') : 'Artista Sconosciuto'
+                        })) : [];
+                        resolve(results);
+                    } catch (e) {
+                        reject(new Error("Errore nel parsing della risposta MusicBrainz: " + e.message));
+                    }
+                } else {
+                    reject(new Error(`Errore MusicBrainz: Stato HTTP ${res.statusCode}`));
+                }
+            });
+        });
+
+        req.on('error', (e) => {
+            reject(new Error("Errore nella richiesta HTTPS: " + e.message));
+        });
+
+        req.end();
+    });
+}
+
+/**
+ * Funzione gestore (handler) per la funzione Vercel Serverless.
+ * Vercel reindirizza la richiesta qui.
+ * @param {object} req L'oggetto richiesta HTTP.
+ * @param {object} res L'oggetto risposta HTTP.
+ */
+module.exports = async (req, res) => {
+    // Imposta le intestazioni CORS (necessarie per le richieste da MIT App Inventor)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Content-Type', 'application/json');
+
+    // Gestione della richiesta OPTIONS (pre-flight check CORS)
+    if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+    }
+
+    const query = req.query.q;
+
+    if (req.method !== 'GET') {
+        res.status(405).send(JSON.stringify({ error: 'Metodo non supportato. Utilizzare solo GET.' }));
+        return;
+    }
+
+    if (!query) {
+        res.status(400).send(JSON.stringify({ error: 'Manca il parametro di query "q". Utilizzo: /api/musicBrainzSearch?q=titolo_canzone' }));
+        return;
+    }
+
+    try {
+        const results = await searchMusicBrainz(query);
+        res.status(200).send(JSON.stringify(results));
+    } catch (error) {
+        console.error('Errore durante la ricerca:', error.message);
+        res.status(500).send(JSON.stringify({ error: 'Errore interno del server durante la ricerca di MusicBrainz.' }));
+    }
+};
